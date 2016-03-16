@@ -50,6 +50,7 @@ if (!$cm = get_coursemodule_from_instance("facetoface", $facetoface->id, $course
 
 require_course_login($course);
 $context = context_course::instance($course->id);
+$contextmodule = context_module::instance($cm->id);
 require_capability('mod/facetoface:view', $context);
 
 $returnurl = "$CFG->wwwroot/course/view.php?id=$course->id";
@@ -130,12 +131,12 @@ echo $OUTPUT->header();
 $heading = get_string('cancelbookingfor', 'facetoface', $facetoface->name);
 
 $viewattendees = has_capability('mod/facetoface:viewattendees', $context);
-$signedup = facetoface_check_signup($facetoface->id);
+$bookedsession = facetoface_is_booked_to_session($session->id, null, $facetoface->id);
 
 echo $OUTPUT->box_start();
 echo $OUTPUT->heading($heading);
 
-if ($signedup) {
+if ($bookedsession) {
     facetoface_print_session($session, $viewattendees);
     $mform->display();
 } else {

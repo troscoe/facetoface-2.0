@@ -34,6 +34,7 @@ require_once($CFG->libdir . '/gradelib.php');
 require_once($CFG->dirroot . '/grade/lib.php');
 require_once($CFG->dirroot . '/lib/adminlib.php');
 require_once($CFG->dirroot . '/user/selector/lib.php');
+require_once($CFG->dirroot . '/user/profile/lib.php');
 if (file_exists($CFG->libdir . '/completionlib.php')) {
     require_once($CFG->libdir . '/completionlib.php');
 }
@@ -57,8 +58,11 @@ define('MDL_F2F_CANCEL_BOTH', 11);    // Send a copy of both 8+2+1.
 define('MDL_F2F_CANCEL_TEXT', 10);    // Send just a plan email 8+2.
 define('MDL_F2F_CANCEL_ICAL', 9);     // Send just a combined text/ical message 8+1.
 
-// Name of the custom field where the manager's email address is stored.
+// Name of the custom field where the manager's email address is stored
 define('MDL_MANAGERSEMAIL_FIELD', 'managersemail');
+define('MDL_MANAGERID_FIELD', 'managerid');
+define('MDL_TYPE_FIELD', 'type');
+define('MDL_EXTERNALID_FIELD', 'externalid');
 
 // Custom field related constants.
 define('CUSTOMFIELD_DELIMITER', '##SEPARATOR##');
@@ -1865,7 +1869,7 @@ function facetoface_user_signup($session, $facetoface, $course, $discountcode,
  * @return string Error string, empty on success
  */
 function facetoface_send_request_notice($facetoface, $session, $userid) {
-    global $DB;
+    global $CFG, $DB;
 
     if (!$manageremail = facetoface_get_manageremail($userid)) {
         return 'error:nomanagersemailset';
@@ -1876,13 +1880,23 @@ function facetoface_send_request_notice($facetoface, $session, $userid) {
         return 'error:invaliduserid';
     }
 
-    if ($fromaddress = get_config(null, 'facetoface_fromaddress')) {
-        $from = new stdClass();
-        $from->maildisplay = true;
-        $from->email = $fromaddress;
-    } else {
-        $from = null;
+    $from = new stdClass();
+    $from->maildisplay = true;
+    $from->firstname = $CFG->supportname;
+    $from->lastname = null;
+    $from->email = $CFG->supportemail;
+
+    // Send to manager
+    $manager = $DB->get_record('user', array('email' => $manageremail));
+    if (!$manager->secret) {
+        $manager->secret = random_string(15);
+        $DB->update_record('user', $manager);
     }
+
+    $a = new stdClass();
+    $a->approveurl = "$CFG->wwwroot/mod/facetoface/approve.php?data=$manager->secret/$manager->username/$session->id/$user->username";
+    $a->declineurl = "$CFG->wwwroot/mod/facetoface/decline.php?data=$manager->secret/$manager->username/$session->id/$user->username";
+
 
     $postsubject = facetoface_email_substitutions(
             $facetoface->requestsubject,
@@ -1911,15 +1925,19 @@ function facetoface_send_request_notice($facetoface, $session, $userid) {
             $session->id
     );
 
+    $posttextmgrheading = str_replace('[approveurl]', $a->approveurl, $posttextmgrheading);
+    $posttextmgrheading = str_replace('[declineurl]', $a->declineurl, $posttextmgrheading);
+
+    $message = $posttextmgrheading;
+    $messagehtml = text_to_html($posttextmgrheading, false, false, true);
+    $manager->mailformat = 1;  // Always send HTML version as well.
+
     // Send to user.
     if (!email_to_user($user, $from, $postsubject, $posttext)) {
         return 'error:cannotsendrequestuser';
     }
 
-    // Send to manager.
-    $user->email = $manageremail;
-
-    if (!email_to_user($user, $from, $postsubject, $posttextmgrheading.$posttext)) {
+    if (!email_to_user($manager, $from, $postsubject, $message, $messagehtml)) {
         return 'error:cannotsendrequestmanager';
     }
 
@@ -2231,14 +2249,25 @@ function facetoface_send_cancellation_notice($facetoface, $session, $userid) {
  * @global class $USER used to get the current userid
  * @returns integer The session id that we signed up for, false otherwise
  */
-function facetoface_check_signup($facetofaceid) {
+function facetoface_is_booked_to_session($sessionid, $submissions=null, $facetofaceid=0, $user=null) {
+
     global $USER;
 
-    if ($submissions = facetoface_get_user_submissions($facetofaceid, $USER->id)) {
-        return reset($submissions)->sessionid;
-    } else {
-        return false;
+    if (!isset($user)) {
+        $user = $USER;
     }
+    if (!isset($submissions)) {
+        // TODO: make this function more efficient by querying the specific session.
+        $submissions = facetoface_get_user_submissions($facetofaceid, $user->id);
+     }
+    if ($submissions) {
+        foreach ($submissions as $bookedsession) {
+            if ($bookedsession->sessionid == $sessionid) {
+                return $bookedsession;
+            }
+        }
+    }
+    return false;
 }
 
 /**
@@ -2248,12 +2277,11 @@ function facetoface_check_signup($facetofaceid) {
  * @param integer $userid User ID of the staff member
  */
 function facetoface_get_manageremail($userid) {
-    global $DB;
-    $fieldid = $DB->get_field('user_info_field', 'id', array('shortname' => MDL_MANAGERSEMAIL_FIELD));
-    if ($fieldid) {
-        return $DB->get_field('user_info_data', 'data', array('userid' => $userid, 'fieldid' => $fieldid));
+    $pur = profile_user_record($userid);
+    if (!empty($pur->managersemail)) {
+        return $pur->managersemail;
     } else {
-        return ''; // No custom field => no manager's email.
+        return 'education@trendmicro.com';
     }
 }
 
@@ -4073,5 +4101,93 @@ class facetoface_existing_selector extends user_selector_base {
         $options['sessionid'] = $this->sessionid;
         $options['file'] = 'mod/facetoface/lib.php';
         return $options;
+    }
+}
+
+/**
+ * Print out the session list - available, past, upcoming
+ *
+ * @param integer $courseid the ID for the current course
+ * @param integer $facetofaceid the ID for the current F2F instance
+ * @param         $location
+ */
+function facetoface_print_session_list($courseid, $facetofaceid, $location) {
+    global $CFG, $USER, $DB, $OUTPUT, $PAGE;
+
+    $f2f_renderer = $PAGE->get_renderer('mod_facetoface');
+
+    $timenow = time();
+
+    $context = context_course::instance($courseid);
+    $viewattendees = has_capability('mod/facetoface:viewattendees', $context);
+    $editsessions = has_capability('mod/facetoface:editsessions', $context);
+
+    $submissions = facetoface_get_user_submissions($facetofaceid, $USER->id);
+
+    $customfields = facetoface_get_session_customfields();
+
+    $upcomingarray = array();
+    $previousarray = array();
+    $upcomingtbdarray = array();
+
+    if ($sessions = facetoface_get_sessions($facetofaceid, $location) ) {
+        foreach ($sessions as $session) {
+
+            $sessionstarted = false;
+            $sessionfull = false;
+            $sessionwaitlisted = false;
+            $isbookedsession = false;
+
+            $sessiondata = $session;
+            $sessiondata->bookedsession = facetoface_is_booked_to_session($session->id, $submissions);
+
+            // Add custom fields to sessiondata
+            $customdata = $DB->get_records('facetoface_session_data', array('sessionid' => $session->id), '', 'fieldid, data');
+            $sessiondata->customfielddata = $customdata;
+
+            // Is session waitlisted
+            if (!$session->datetimeknown) {
+                $sessionwaitlisted = true;
+            }
+
+            // Check if session is started
+            if ($session->datetimeknown && facetoface_has_session_started($session, $timenow) && facetoface_is_session_in_progress($session, $timenow)) {
+                $sessionstarted = true;
+            }
+            elseif ($session->datetimeknown && facetoface_has_session_started($session, $timenow)) {
+                $sessionstarted = true;
+            }
+
+            // Put the row in the right table
+            if ($sessionstarted) {
+                $previousarray[] = $sessiondata;
+            }
+            elseif ($sessionwaitlisted) {
+                $upcomingtbdarray[] = $sessiondata;
+            }
+            else { // Normal scheduled session
+                $upcomingarray[] = $sessiondata;
+            }
+        }
+    }
+
+    // Upcoming sessions
+    echo $OUTPUT->heading(get_string('upcomingsessions', 'facetoface'));
+    if (empty($upcomingarray) && empty($upcomingtbdarray)) {
+        print_string('noupcoming', 'facetoface');
+    }
+    else {
+        $upcomingarray = array_merge($upcomingarray, $upcomingtbdarray);
+        echo $f2f_renderer->print_session_list_table($customfields, $upcomingarray, $viewattendees, $editsessions);
+    }
+
+    if ($editsessions) {
+        echo html_writer::tag('p', html_writer::link(new moodle_url('sessions.php', array('f' => $facetofaceid)), get_string('addsession', 'facetoface')));
+    }
+
+    // Previous sessions
+    if (!empty($previousarray)) {
+        echo $OUTPUT->heading(get_string('previoussessions', 'facetoface'));
+        echo $f2f_renderer->print_session_list_table($customfields, $previousarray, $viewattendees, $editsessions);
     }
 }

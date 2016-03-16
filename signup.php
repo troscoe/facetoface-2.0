@@ -33,6 +33,8 @@ require_once('lib.php');
 
 $s = required_param('s', PARAM_INT); // Facetoface session ID.
 $backtoallsessions = optional_param('backtoallsessions', 0, PARAM_INT);
+$course_id = optional_param('course_id', 0, PARAM_INT);
+$course_name = optional_param('course_name', '', PARAM_RAW);
 
 if (!$session = facetoface_get_session($s)) {
     print_error('error:incorrectcoursemodulesession', 'facetoface');
@@ -49,12 +51,10 @@ if (!$cm = get_coursemodule_from_instance("facetoface", $facetoface->id, $course
 
 require_course_login($course, true, $cm);
 $context = context_course::instance($course->id);
+$contextmodule = context_module::instance($cm->id);
 require_capability('mod/facetoface:view', $context);
 
-$returnurl = "$CFG->wwwroot/course/view.php?id=$course->id";
-if ($backtoallsessions) {
-    $returnurl = "$CFG->wwwroot/mod/facetoface/view.php?f=$backtoallsessions";
-}
+$returnurl = "http://education.trendmicro.com/en/component/joomdle/course/$course_id-$course_name/$s";
 
 $pagetitle = format_string($facetoface->name);
 
@@ -93,7 +93,6 @@ if ($mform->is_cancelled()) {
 }
 
 if ($fromform = $mform->get_data()) { // Form submitted.
-
     if (empty($fromform->submitbutton)) {
         print_error('error:unknownbuttonclicked', 'facetoface', $returnurl);
     }
@@ -123,20 +122,21 @@ if ($fromform = $mform->get_data()) { // Form submitted.
         $statuscode = MDL_F2F_STATUS_WAITLISTED;
     }
 
+    $submissions = facetoface_get_user_submissions($facetoface->id, $USER->id);
     if (!facetoface_session_has_capacity($session, $context) && (!$session->allowoverbook)) {
         print_error('sessionisfull', 'facetoface', $returnurl);
-    } else if (facetoface_get_user_submissions($facetoface->id, $USER->id)) {
+    } else if ((!$facetoface->multiplesessions && $submissions) || facetoface_is_booked_to_session($session->id, $submissions)) {
         print_error('alreadysignedup', 'facetoface', $returnurl);
     } else if (facetoface_manager_needed($facetoface) && !facetoface_get_manageremail($USER->id)) {
         print_error('error:manageremailaddressmissing', 'facetoface', $returnurl);
     } else if ($submissionid = facetoface_user_signup($session, $facetoface, $course, $fromform->discountcode, $fromform->notificationtype, $statuscode)) {
-
+        
         // Logging and events trigger.
         $params = array(
             'context'  => $contextmodule,
             'objectid' => $session->id
         );
-        $event = \mod_facetoface\event\signup::create($params);
+        $event = \mod_facetoface\event\signup_success::create($params);
         $event->add_record_snapshot('facetoface_sessions', $session);
         $event->add_record_snapshot('facetoface', $facetoface);
         $event->trigger();
@@ -148,10 +148,9 @@ if ($fromform = $mform->get_data()) { // Form submitted.
             $message .= html_writer::empty_tag('br') . html_writer::empty_tag('br') . get_string('confirmationsent', 'facetoface');
         }
 
-        $timemessage = 4;
-        redirect($returnurl, $message, $timemessage);
+        redirect($returnurl);
+        
     } else {
-
         // Logging and events trigger.
         $params = array(
             'context'  => $contextmodule,
@@ -164,7 +163,6 @@ if ($fromform = $mform->get_data()) { // Form submitted.
 
         print_error('error:problemsigningup', 'facetoface', $returnurl);
     }
-
     redirect($returnurl);
 } else if ($manageremail !== false) {
 
@@ -179,11 +177,7 @@ echo $OUTPUT->header();
 $heading = get_string('signupfor', 'facetoface', $facetoface->name);
 
 $viewattendees = has_capability('mod/facetoface:viewattendees', $context);
-$signedup = facetoface_check_signup($facetoface->id);
-
-if ($signedup and $signedup != $session->id) {
-    print_error('error:signedupinothersession', 'facetoface', $returnurl);
-}
+$bookedsession = facetoface_is_booked_to_session($session->id, null, $facetoface->id);
 
 echo $OUTPUT->box_start();
 echo $OUTPUT->heading($heading);
@@ -202,7 +196,7 @@ if ($session->datetimeknown && facetoface_has_session_started($session, $timenow
     exit;
 }
 
-if (!$signedup && !facetoface_session_has_capacity($session, $context) && (!$session->allowoverbook)) {
+if (!$bookedsession && !facetoface_session_has_capacity($session, $context) && (!$session->allowoverbook)) {
     print_error('sessionisfull', 'facetoface', $returnurl);
     echo $OUTPUT->box_end();
     echo $OUTPUT->footer($course);
@@ -211,7 +205,7 @@ if (!$signedup && !facetoface_session_has_capacity($session, $context) && (!$ses
 
 echo facetoface_print_session($session, $viewattendees);
 
-if ($signedup) {
+if ($bookedsession) {
     if (!($session->datetimeknown && facetoface_has_session_started($session, $timenow))) {
 
         // Cancellation link.
@@ -231,6 +225,7 @@ if ($signedup) {
 
     // Don't allow signup to proceed if a manager is required.
     // Check to see if the user has a managers email set.
+
     echo html_writer::tag('p', html_writer::tag('strong', get_string('error:manageremailaddressmissing', 'facetoface')));
     echo html_writer::empty_tag('br') . html_writer::link($returnurl, get_string('goback', 'facetoface'), array('title' => get_string('goback', 'facetoface')));
 
@@ -238,7 +233,6 @@ if ($signedup) {
     echo html_writer::tag('p', html_writer::tag('strong', get_string('error:nopermissiontosignup', 'facetoface')));
     echo html_writer::empty_tag('br') . html_writer::link($returnurl, get_string('goback', 'facetoface'), array('title' => get_string('goback', 'facetoface')));
 } else {
-
     // Signup form.
     $mform->display();
 }

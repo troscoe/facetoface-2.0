@@ -197,6 +197,7 @@ if ($fromform = $mform->get_data()) { // Form submitted.
         $sessionid = $session->id;
 
         $todb->id = $session->id;
+        $todb->timecreated = $session->timecreated;
         if (!facetoface_update_session($todb, $sessiondates)) {
             $transaction->force_transaction_rollback();
 
