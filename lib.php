@@ -34,7 +34,6 @@ require_once($CFG->libdir . '/gradelib.php');
 require_once($CFG->dirroot . '/grade/lib.php');
 require_once($CFG->dirroot . '/lib/adminlib.php');
 require_once($CFG->dirroot . '/user/selector/lib.php');
-require_once($CFG->dirroot . '/user/profile/lib.php');
 if (file_exists($CFG->libdir . '/completionlib.php')) {
     require_once($CFG->libdir . '/completionlib.php');
 }
@@ -2277,11 +2276,26 @@ function facetoface_is_booked_to_session($sessionid, $submissions=null, $facetof
  * @param integer $userid User ID of the staff member
  */
 function facetoface_get_manageremail($userid) {
-    $pur = profile_user_record($userid);
-    if (!empty($pur->managersemail)) {
-        return $pur->managersemail;
+    global $DB, $CFG;
+    
+    $fieldid = $DB->get_field('user_info_field', 'id', array('shortname' => MDL_TYPE_FIELD));
+    if ($fieldid) {
+        $type = $DB->get_field('user_info_data', 'data', array('userid' => $userid, 'fieldid' => $fieldid));
+    }
+
+    $fieldid = $DB->get_field('user_info_field', 'id', array('shortname' => MDL_MANAGERID_FIELD));
+
+    if ($fieldid) {
+       $managerid = $DB->get_field('user_info_data', 'data', array('userid' => $userid, 'fieldid' => $fieldid));
+        if ($managerid AND $type == "Employee") {
+              $fieldid = $DB->get_field('user_info_field', 'id', array('shortname' => MDL_EXTERNALID_FIELD));
+              $id = $DB->get_field('user_info_data','userid', array('data' => $managerid, 'fieldid' => $fieldid));
+              return $DB->get_field('user', 'email', array('id' => $id));
+        } else {
+            return $CFG->supportemail;
+        }
     } else {
-        return 'education@trendmicro.com';
+        return ''; // No custom field => no manager's email
     }
 }
 
